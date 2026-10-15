@@ -7,17 +7,32 @@ const char* ssid = "SSID";
 const char* password = "PASSWORD";
 
 // ===== PINOS DOS SENSORES =====
-const int TRIG_VAGA1 = 4;
-const int ECHO_VAGA1 = 5;
 
-const int TRIG_VAGA2 = 22;
-const int ECHO_VAGA2 = 23;
+const int TRIG_VAGA1 = 34;
+const int ECHO_VAGA1 = 35;
 
-const int TRIG_VAGA3 = 32;
-const int ECHO_VAGA3 = 33;
+const int TRIG_VAGA2 = 32;
+const int ECHO_VAGA2 = 33;
+
+const int TRIG_VAGA3 = 22;
+const int ECHO_VAGA3 = 23;
+
+// Sensor que detecta o carro antes da cancela.
+const int TRIG_ENTRADA = 4;
+const int ECHO_ENTRADA = 5;
+
+// Sensor que monitora a zona de passagem da cancela.
+const int TRIG_PASSAGEM = 13;
+const int ECHO_PASSAGEM = 14;
+
+const float DISTANCIA_CARRO_ENTRADA_CM = 20.0;
+const float DISTANCIA_PASSAGEM_CM = 20.0;
+
+// Indica que o veiculo ja comecou a atravessar.
+bool passagemIniciada = false;
 
 // ===== PINOS DOS COMPONENTES =====
-const int PINO_SERVO = 13;
+const int PINO_SERVO = 12;
 const int LED_VERDE = 26;
 const int LED_VERMELHO = 27;
 
@@ -58,6 +73,37 @@ float medirDistancia(int trig, int echo) {
   }
 
   return duracao * 0.0343 / 2.0;
+}
+
+// Detecta um veiculo antes da cancela.
+bool detectarCarroEntrada() {
+  float distancia = medirDistancia(
+    TRIG_ENTRADA,
+    ECHO_ENTRADA
+  );
+
+  // Falha de leitura nao confirma a presenca de um carro.
+  if (distancia <= 0) {
+    return false;
+  }
+
+  return distancia <= DISTANCIA_CARRO_ENTRADA_CM;
+}
+
+// Detecta um veiculo na zona de passagem da cancela.
+bool detectarPassagem() {
+  float distancia = medirDistancia(
+    TRIG_PASSAGEM,
+    ECHO_PASSAGEM
+  );
+
+  // Em caso de falha, considera a zona ocupada
+  // para evitar fechar a cancela indevidamente.
+  if (distancia <= 0) {
+    return true;
+  }
+
+  return distancia <= DISTANCIA_PASSAGEM_CM;
 }
 
 bool detectarOcupacao(int trig, int echo) {
@@ -267,6 +313,15 @@ void enviarEstado() {
 void setup() {
   Serial.begin(115200);
 
+  pinMode(TRIG_ENTRADA, OUTPUT);
+  pinMode(ECHO_ENTRADA, INPUT);
+
+  pinMode(TRIG_PASSAGEM, OUTPUT);
+  pinMode(ECHO_PASSAGEM, INPUT);
+
+  digitalWrite(TRIG_ENTRADA, LOW);
+  digitalWrite(TRIG_PASSAGEM, LOW);
+
   pinMode(TRIG_VAGA1, OUTPUT);
   pinMode(ECHO_VAGA1, INPUT);
   pinMode(TRIG_VAGA2, OUTPUT);
@@ -334,13 +389,46 @@ void setup() {
 void loop() {
   server.handleClient();
 
+  // Atualiza as tres vagas periodicamente.
   if (millis() - ultimaLeitura >= INTERVALO_LEITURA) {
     ultimaLeitura = millis();
     atualizarVagas();
   }
 
-  if (cancelaAberta &&
-      millis() - instanteAbertura >= TEMPO_CANCELA_ABERTA) {
+  bool carroNaEntrada = detectarCarroEntrada();
+  bool carroNaPassagem = detectarPassagem();
+
+  // Abre quando um carro chega e existe vaga livre.
+  if (!cancelaAberta && carroNaEntrada) {
+    atualizarVagas();
+
+    if (vagasLivres() > 0) {
+      cancela.write(ANGULO_ABERTO);
+      cancelaAberta = true;
+      passagemIniciada = false;
+
+      Serial.println("Veiculo detectado. Cancela aberta.");
+    } else {
+      Serial.println("Estacionamento lotado.");
+    }
+  }
+
+  // Registra que o veiculo chegou a zona da cancela.
+  if (cancelaAberta && carroNaPassagem) {
+    passagemIniciada = true;
+  }
+
+  // Fecha somente quando a zona de passagem e a
+  // aproximacao estiverem livres apos a passagem.
+  if (
+    cancelaAberta &&
+    passagemIniciada &&
+    !carroNaPassagem &&
+    !carroNaEntrada
+  ) {
     fecharCancela();
+    passagemIniciada = false;
+
+    Serial.println("Passagem concluida. Cancela fechada.");
   }
 }
