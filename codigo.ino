@@ -4,7 +4,7 @@
 
 // ===== CONFIGURACAO WI-FI =====
 const char* ssid = "SSID";
-const char* password = "PASSWORD";
+const char* password = "PASS";
 
 // ===== PINOS DOS SENSORES =====
 
@@ -30,6 +30,12 @@ const float DISTANCIA_PASSAGEM_CM = 20.0;
 
 // Indica que o veiculo ja comecou a atravessar.
 bool passagemIniciada = false;
+
+// ===== CONTROLE ROBUSTO DA PASSAGEM =====
+const unsigned long TEMPO_ZONA_LIVRE = 200;
+
+bool aguardandoLiberacao = false;
+unsigned long instanteZonaLivre = 0;
 
 // ===== PINOS DOS COMPONENTES =====
 const int PINO_SERVO = 12;
@@ -161,12 +167,26 @@ void abrirCancela() {
     cancela.write(ANGULO_ABERTO);
     cancelaAberta = true;
     instanteAbertura = millis();
+
+    passagemIniciada = false;
+    aguardandoLiberacao = false;
+    instanteZonaLivre = 0;
+
+    Serial.println("Cancela aberta.");
+  } else {
+    Serial.println("Estacionamento lotado.");
   }
 }
 
 void fecharCancela() {
   cancela.write(ANGULO_FECHADO);
   cancelaAberta = false;
+
+  passagemIniciada = false;
+  aguardandoLiberacao = false;
+  instanteZonaLivre = 0;
+
+  Serial.println("Cancela fechada.");
 }
 
 String estadoVaga(bool ocupada) {
@@ -396,23 +416,83 @@ void setup() {
 void loop() {
   server.handleClient();
 
-  // Atualiza as tres vagas periodicamente.
+  // Atualiza as vagas periodicamente.
   if (millis() - ultimaLeitura >= INTERVALO_LEITURA) {
     ultimaLeitura = millis();
     atualizarVagas();
   }
 
-  bool carroNaEntrada = detectarCarroEntrada();
-  bool carroNaPassagem = detectarPassagem();
+  // ===== LEITURA DO SENSOR DE ENTRADA =====
+  float distanciaEntrada = medirDistancia(
+    TRIG_ENTRADA,
+    ECHO_ENTRADA
+  );
 
-  // Abre quando um carro chega e existe vaga livre.
+  // Pequeno intervalo para reduzir interferência
+  // entre os dois sensores ultrassônicos.
+  delay(30);
+
+  // ===== LEITURA DO SENSOR DE PASSAGEM =====
+  float distanciaPassagem = medirDistancia(
+    TRIG_PASSAGEM,
+    ECHO_PASSAGEM
+  );
+
+  // Distingue uma leitura válida de uma falha.
+  bool entradaValida = distanciaEntrada > 0;
+  bool passagemValida = distanciaPassagem > 0;
+
+  bool carroNaEntrada =
+    entradaValida &&
+    distanciaEntrada <= DISTANCIA_CARRO_ENTRADA_CM;
+
+  bool carroNaPassagem =
+    passagemValida &&
+    distanciaPassagem <= DISTANCIA_PASSAGEM_CM;
+
+  // ===== DIAGNOSTICO SERIAL =====
+  static unsigned long ultimaMensagem = 0;
+
+  if (millis() - ultimaMensagem >= 500) {
+    ultimaMensagem = millis();
+
+    Serial.print("Entrada: ");
+
+    if (entradaValida) {
+      Serial.print(distanciaEntrada);
+      Serial.print(" cm");
+    } else {
+      Serial.print("SEM RESPOSTA");
+    }
+
+    Serial.print(" | Passagem: ");
+
+    if (passagemValida) {
+      Serial.print(distanciaPassagem);
+      Serial.print(" cm");
+    } else {
+      Serial.print("SEM RESPOSTA");
+    }
+
+    Serial.print(" | Cancela: ");
+    Serial.print(cancelaAberta ? "ABERTA" : "FECHADA");
+
+    Serial.print(" | Passagem iniciada: ");
+    Serial.println(passagemIniciada ? "SIM" : "NAO");
+  }
+
+  // ===== ABERTURA AUTOMATICA =====
   if (!cancelaAberta && carroNaEntrada) {
     atualizarVagas();
 
     if (vagasLivres() > 0) {
       cancela.write(ANGULO_ABERTO);
       cancelaAberta = true;
+      instanteAbertura = millis();
+
       passagemIniciada = false;
+      aguardandoLiberacao = false;
+      instanteZonaLivre = 0;
 
       Serial.println("Veiculo detectado. Cancela aberta.");
     } else {
@@ -420,22 +500,60 @@ void loop() {
     }
   }
 
-  // Registra que o veiculo chegou a zona da cancela.
+  // ===== DETECCAO DA PASSAGEM =====
+  // O segundo sensor precisa detectar o veiculo.
   if (cancelaAberta && carroNaPassagem) {
+    if (!passagemIniciada) {
+      Serial.println("Veiculo detectado na zona de passagem.");
+    }
+
     passagemIniciada = true;
+
+    // Ainda existe um objeto na zona.
+    aguardandoLiberacao = false;
+    instanteZonaLivre = 0;
   }
 
-  // Fecha somente quando a zona de passagem e a
-  // aproximacao estiverem livres apos a passagem.
-  if (
-    cancelaAberta &&
-    passagemIniciada &&
-    !carroNaPassagem &&
-    !carroNaEntrada
-  ) {
-    fecharCancela();
-    passagemIniciada = false;
+  // ===== FECHAMENTO SEGURO =====
+  // So comeca a contar depois que a passagem foi detectada.
+  if (cancelaAberta && passagemIniciada) {
 
-    Serial.println("Passagem concluida. Cancela fechada.");
+    // Uma leitura invalida nao confirma que a zona esta livre.
+    if (!entradaValida || !passagemValida) {
+      aguardandoLiberacao = false;
+      instanteZonaLivre = 0;
+    }
+
+    // Os dois sensores precisam confirmar que nao ha objeto.
+    else if (!carroNaEntrada && !carroNaPassagem) {
+
+      if (!aguardandoLiberacao) {
+        aguardandoLiberacao = true;
+        instanteZonaLivre = millis();
+
+        Serial.println(
+          "Zona livre. Confirmando antes de fechar..."
+        );
+      }
+
+      // Exige 700 ms de zona livre continua.
+      if (
+        aguardandoLiberacao &&
+        millis() - instanteZonaLivre >= TEMPO_ZONA_LIVRE
+      ) {
+        fecharCancela();
+
+        Serial.println(
+          "Passagem concluida. Cancela fechada."
+        );
+      }
+    }
+
+    // Se qualquer sensor detectar novamente um objeto,
+    // reinicia a contagem de zona livre.
+    else {
+      aguardandoLiberacao = false;
+      instanteZonaLivre = 0;
+    }
   }
 }
