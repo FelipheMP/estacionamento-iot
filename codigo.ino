@@ -8,7 +8,7 @@ const char* password = "PASSWORD";
 
 // ===== PINOS DOS SENSORES =====
 
-const int TRIG_VAGA1 = 34;
+const int TRIG_VAGA1 = 25;
 const int ECHO_VAGA1 = 35;
 
 const int TRIG_VAGA2 = 32;
@@ -109,12 +109,19 @@ bool detectarPassagem() {
 bool detectarOcupacao(int trig, int echo) {
   float distancia = medirDistancia(trig, echo);
 
-  // Sem leitura valida, nao considera a vaga livre.
-  // Na montagem real, convem distinguir falha de sensor
-  // de uma vaga efetivamente ocupada.
-  if (distancia < 0) {
+  Serial.print("TRIG=");
+  Serial.print(trig);
+  Serial.print(" ECHO=");
+  Serial.print(echo);
+  Serial.print(" Distancia=");
+
+  if (distancia <= 0) {
+    Serial.println("SEM RESPOSTA");
     return true;
   }
+
+  Serial.print(distancia);
+  Serial.println(" cm");
 
   return distancia <= DISTANCIA_OCUPADO_CM;
 }
@@ -311,7 +318,7 @@ void enviarEstado() {
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(921600);
 
   pinMode(TRIG_ENTRADA, OUTPUT);
   pinMode(ECHO_ENTRADA, INPUT);
